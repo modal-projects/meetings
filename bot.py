@@ -800,10 +800,26 @@ class Kimi:
                     flush=True,
                 )
 
+
+def archive_dir(state):
+    return (
+        Path("/archive/meetings")
+        / f"{state['meet'].rsplit('/', 1)[-1]}-{state['session']}"
+    )
+
 class Meetings:
     def status(self, state, status):
         state["status"] = status
         print(json.dumps({"session": state["session"], "status": status}), flush=True)
+
+    async def persist(self, state):
+        directory = archive_dir(state)
+        await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            (directory / "state.json").write_text, json.dumps(state)
+        )
+        await self.bot_state.put.aio(f"archive:{state['meet']}", directory.name)
+        await self.archive.commit.aio()
 
     def __init__(self, terminate, archive, base_url, bot_state):
         self.terminate = terminate
@@ -871,8 +887,15 @@ class Meetings:
             logger.exception("session %s failed", session)
         finally:
             self.status(state, "left")
-            token = self.tokens.pop(session)
-            await self.terminate(token)
+            try:
+                await self.persist(state)
+            except Exception:
+                logger.exception("session %s: archive write failed", session)
+            self.tasks.pop(session, None)
+            self.states.pop(session, None)
+            token = self.tokens.pop(session, None)
+            if token:
+                await self.terminate(token)
             entry = await self.bot_state.get.aio(f"active:{state['meet']}")
             if entry and entry[1] == token:
                 await self.bot_state.pop.aio(f"active:{state['meet']}")
@@ -1026,7 +1049,7 @@ class Meetings:
             blocks = {}
             seen_others = False
             alone_since = None
-            flushed = screened = time.monotonic()
+            flushed = time.monotonic()
             while True:
                 try:
                     await read_captions(captions, state["transcript"], blocks)
@@ -1052,7 +1075,13 @@ class Meetings:
                 else:
                     alone = not await page.get_by_role(
                         "button", name=re.compile(r"^Leave call\b")
-                    ).count()
+                    ).count() or (
+                        time.monotonic() - entered >= 900
+                        and await page.evaluate(
+                            "() => document.querySelectorAll('[data-participant-id]').length"
+                        )
+                        <= 1
+                    )
                 if not alone:
                     alone_since = None
                 elif alone_since is None:
@@ -1064,6 +1093,15 @@ class Meetings:
                     except Exception:
                         logger.exception("session %s: recap failed", state["session"])
                     break
+                now = time.monotonic()
+                if now - flushed >= 60:
+                    flushed = now
+                    try:
+                        await self.persist(state)
+                    except Exception:
+                        logger.exception(
+                            "session %s: archive write failed", state["session"]
+                        )
                 await asyncio.sleep(0.5)
         except Exception:
             logger.exception("session %s failed during %s", state["session"], stage)
