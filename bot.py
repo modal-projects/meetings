@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
+import avatar
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from html.parser import HTMLParser
@@ -29,6 +30,7 @@ chrome_ua = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
 
 class HTMLTextStripper(HTMLParser):
     def __init__(self):
@@ -50,10 +52,12 @@ class HTMLTextStripper(HTMLParser):
         if stripped := data.strip():
             self.parts.append(stripped)
 
+
 def strip_html(text):
     stripper = HTMLTextStripper()
     stripper.feed(text)
     return "\n".join(stripper.parts)
+
 
 async def fetch_text(url):
     async with httpx.AsyncClient(
@@ -70,6 +74,7 @@ async def fetch_text(url):
     if len(text) > max_page_chars:
         text = text[:max_page_chars] + f"\n\n[truncated to {max_page_chars} chars]"
     return text
+
 
 def tools():
     offered = [
@@ -109,8 +114,11 @@ def tools():
     ]
     return offered
 
+
 browser_args = [
     "--use-fake-ui-for-media-stream",
+    "--use-fake-device-for-media-stream",
+    "--use-file-for-fake-video-capture=/tmp/hal.y4m",
     "--autoplay-policy=no-user-gesture-required",
     "--window-size=1920,1080",
     "--window-position=0,0",
@@ -119,6 +127,7 @@ browser_args = [
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--profile-directory=Profile 1",
 ]
+
 
 async def start_display():
     process = await asyncio.create_subprocess_exec(
@@ -130,6 +139,7 @@ async def start_display():
                 raise RuntimeError("display failed to start")
             await asyncio.sleep(0.1)
     return process
+
 
 async def read_captions(region, transcript, blocks):
     rows = await region.evaluate("""region => {
@@ -186,6 +196,7 @@ async def read_captions(region, transcript, blocks):
                 "offset": 0,
             }
 
+
 profile_ignore_names = (
     "Singleton*",
     "Cache",
@@ -216,6 +227,7 @@ profile_ignore_names = (
 )
 profile_ignore = shutil.ignore_patterns(*profile_ignore_names)
 
+
 async def copy_profile(directory):
     started = time.monotonic()
     await asyncio.to_thread(
@@ -234,6 +246,7 @@ async def copy_profile(directory):
         ),
         flush=True,
     )
+
 
 async def debug_dump(page, archive, session, stage):
     try:
@@ -271,11 +284,13 @@ async def debug_dump(page, archive, session, stage):
     except Exception:
         logger.exception("debug capture failed for %s", session)
 
+
 class Kimi:
-    def __init__(self, page, state, archive):
+    def __init__(self, page, state, archive, feed):
         self.page = page
         self.state = state
         self.archive = archive
+        self.feed = feed
         self.url = state["url"]
         self.sent = set()
         self.seen = set()
@@ -360,6 +375,7 @@ class Kimi:
         if (digest := hashlib.md5(png).hexdigest()) == self.last_screen:
             return
         self.last_screen = digest
+        self.feed.set("CAPTURING")
         directory = archive_dir(self.state) / "screens"
         await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
         name = f"{len(self.state['screens'])}.png"
@@ -387,6 +403,7 @@ class Kimi:
             )
             response.raise_for_status()
         desc = (response.json()["choices"][0]["message"].get("content") or "").strip()
+        self.feed.set("LISTENING")
         self.state["screens"].append(
             {
                 "t": time.time(),
@@ -464,6 +481,7 @@ class Kimi:
 
     def trigger(self, entry):
         if wake_word.search(entry["text"]):
+            self.feed.set("ANSWERING")
             self.pending.append(entry)
             self.ready.set()
 
@@ -603,8 +621,11 @@ class Kimi:
                 questions, self.pending = self.pending, []
                 try:
                     if any(recap_word.search(entry["text"]) for entry in questions):
+                        self.feed.set("ANSWERING")
                         await self.recap(client)
+                        self.feed.set("LISTENING")
                         continue
+                    self.feed.set("ANSWERING")
                     recent = sorted(
                         self.state["transcript"][-30:] + self.state["chat"][-30:],
                         key=lambda entry: entry["t"],
@@ -663,6 +684,7 @@ class Kimi:
                             )
                     if reply:
                         await self.send(reply[:4000])
+                    self.feed.set("LISTENING")
                 except Exception:
                     logger.exception(
                         "session %s: Kimi reply failed", self.state["session"]
@@ -675,11 +697,13 @@ class Kimi:
                         self.ready.set()
                     await asyncio.sleep(5)
 
+
 def archive_dir(state):
     return (
         Path("/archive/meetings")
         / f"{state['meet'].rsplit('/', 1)[-1]}-{state['session']}"
     )
+
 
 class Meetings:
     def status(self, state, status):
@@ -782,6 +806,7 @@ class Meetings:
         page = None
         responder = None
         stage = "launch"
+        feed = avatar.Feed(Path("/tmp/hal.y4m"))
         try:
             context = await playwright.chromium.launch_persistent_context(
                 directory,
@@ -904,7 +929,8 @@ class Meetings:
                     break
                 except PlaywrightTimeoutError:
                     pass
-            kimi = Kimi(page, state, self.archive)
+            feed.set("LISTENING")
+            kimi = Kimi(page, state, self.archive, feed)
             try:
                 await kimi.send(f"Say 'hal' to ask me something. {kimi.url}")
             except Exception:
@@ -990,11 +1016,13 @@ class Meetings:
                 await debug_dump(page, self.archive, state["session"], stage)
             raise
         finally:
+            feed.set("LISTENING")
             if responder is not None:
                 responder.cancel()
                 await asyncio.gather(responder, return_exceptions=True)
             if context is not None:
                 await context.close()
+            feed.close()
 
     async def close(self):
         for task in self.tasks.values():

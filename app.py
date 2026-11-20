@@ -38,7 +38,7 @@ image = (
         "useradd --create-home chrome",
     )
     .add_local_dir(root / "web", "/meetings/web", copy=True)
-    .add_local_python_source("app", "bot")
+    .add_local_python_source("app", "bot", "avatar")
 )
 
 
