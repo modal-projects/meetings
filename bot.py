@@ -454,8 +454,7 @@ class Kimi:
                 "t": time.time(),
             }
             self.state["chat"].append(entry)
-            if hal_name.search(entry["text"]):
-                self.consider(entry)
+            self.consider(entry)
         now = time.monotonic()
         for entry in self.state["transcript"]:
             key = entry["t"]
@@ -464,9 +463,9 @@ class Kimi:
                 self.captions[key] = [entry["text"], now]
             elif (
                 len(previous) < 3
-                and now - previous[1] >= 1.5
+                and now - previous[1]
+                >= (1.5 if hal_name.search(entry["text"]) else 4)
                 and not own_speaker.search(entry["speaker"])
-                and hal_name.search(entry["text"])
                 and len(entry["text"].strip()) >= 8
             ):
                 previous.append(1)
