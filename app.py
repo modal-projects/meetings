@@ -1,7 +1,14 @@
 import asyncio
+import hmac
+import json
+import os
+import re
+import time
 from contextlib import suppress
 from pathlib import Path
+from urllib.parse import urlencode
 
+import httpx
 import modal
 
 root = Path(__file__).resolve().parent
@@ -11,6 +18,12 @@ profile = modal.Volume.from_name("meetings-chrome-profile", create_if_missing=Tr
 archive = modal.Volume.from_name(
     "meetings-archive", create_if_missing=True, environment_name="demos"
 )
+bot_state = modal.Dict.from_name(
+    "meetings-bot-state", create_if_missing=True, environment_name="demos"
+)
+
+meet_link = re.compile(r"https://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}")
+stale_s = 15 * 60
 image = (
     modal.Image.debian_slim(python_version="3.13")
     .apt_install("curl", "fonts-dejavu-core", "xvfb", "x11vnc", "novnc", "websockify")
@@ -64,6 +77,130 @@ class Bot:
         with suppress(ProcessLookupError):
             self.display.terminate()
         await self.display.wait()
+
+
+@app.function(
+    image=image,
+    min_containers=1,
+    secrets=[modal.Secret.from_name("meetings-proxy")],
+)
+@modal.asgi_app()
+def launcher():
+    from fastapi import FastAPI, Form, HTTPException, Request
+    from fastapi.responses import RedirectResponse
+
+    api = FastAPI()
+
+    def authed(request: Request) -> bool:
+        return hmac.compare_digest(
+            request.headers.get("x-meetings-key", ""), os.environ["MODAL_PROXY_KEY"]
+        ) and hmac.compare_digest(
+            request.headers.get("x-meetings-secret", ""),
+            os.environ["MODAL_PROXY_SECRET"],
+        )
+
+    @api.post("/join")
+    async def join(request: Request, meet: str = Form()):
+        if not authed(request):
+            raise HTTPException(status_code=401, detail="proxy auth required")
+        meet = meet.strip()
+        if not meet_link.fullmatch(meet):
+            raise HTTPException(status_code=400, detail="not a google meet url")
+        try:
+            session = await asyncio.wait_for(
+                Bot.sessions.start.aio(idle_timeout=meeting_s), timeout=170
+            )
+        except TimeoutError:
+            raise HTTPException(
+                status_code=503, detail="session start timed out"
+            ) from None
+        url = (await Bot.get_url.aio()).rstrip("/") + "/"
+        location = f"{url}?{urlencode({'modal_session_token': session.token, 'token': session.token, 'meet': meet})}"
+        return RedirectResponse(location, status_code=303)
+
+    return api
+
+
+def reminder_meet_url(message: dict) -> str | None:
+    for file in message.get("files", []):
+        if (
+            file.get("filetype") == "email"
+            and any(
+                sender.get("address") == "calendar-notification@google.com"
+                for sender in file.get("from", [])
+            )
+            and file.get("subject", "").startswith("Notification:")
+        ):
+            body = file.get("plain_text") or file.get("preview", "")
+            if match := meet_link.search(body):
+                return match.group(0)
+    return None
+
+
+def invite(url: str) -> None:
+    launcher_url = launcher.get_web_url()
+    httpx.post(
+        f"{launcher_url.rstrip('/')}/join",
+        data={"meet": url},
+        headers={
+            "X-Meetings-Key": os.environ["MODAL_PROXY_KEY"],
+            "X-Meetings-Secret": os.environ["MODAL_PROXY_SECRET"],
+        },
+        follow_redirects=True,
+        timeout=180,
+    ).raise_for_status()
+
+
+@app.function(
+    image=modal.Image.debian_slim(python_version="3.13").pip_install("httpx"),
+    schedule=modal.Cron("* * * * *"),
+    secrets=[
+        modal.Secret.from_name("meetings-slack"),
+        modal.Secret.from_name("meetings-proxy"),
+    ],
+    timeout=300,
+)
+def poll() -> None:
+    cursor = bot_state.get("cursor") or str(time.time() - stale_s)
+    response = httpx.get(
+        "https://slack.com/api/conversations.history",
+        headers={"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"},
+        params={
+            "channel": os.environ["SLACK_CHANNEL"],
+            "oldest": cursor,
+            "limit": 200,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"conversations.history failed: {payload.get('error')}")
+    for message in reversed(payload.get("messages") or []):
+        ts = message["ts"]
+        if float(ts) < time.time() - stale_s:
+            continue
+        url = reminder_meet_url(message)
+        if url and bot_state.get(f"notified:{url}") == ts:
+            bot_state["cursor"] = ts
+            continue
+        if url:
+            try:
+                invite(url)
+                bot_state[f"notified:{url}"] = ts
+                print(json.dumps({"event": "joined", "url": url, "ts": ts}))
+            except Exception as exc:
+                print(
+                    json.dumps(
+                        {
+                            "event": "invite_failed",
+                            "url": url,
+                            "ts": ts,
+                            "error": str(exc),
+                        }
+                    )
+                )
+        bot_state["cursor"] = ts
 
 
 @app.function(
