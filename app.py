@@ -1,8 +1,11 @@
 import asyncio
+import hashlib
 import hmac
+import html
 import json
 import os
 import re
+import secrets
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -14,7 +17,9 @@ import modal
 root = Path(__file__).resolve().parent
 meeting_s = 4 * 3600
 app = modal.App("meetings")
-profile = modal.Volume.from_name("meetings-chrome-profile", create_if_missing=True)
+profile = modal.Volume.from_name(
+    "meetings-chrome-profile", create_if_missing=True, environment_name="demos"
+)
 archive = modal.Volume.from_name(
     "meetings-archive", create_if_missing=True, environment_name="demos"
 )
@@ -61,6 +66,7 @@ class Bot:
             Bot.sessions.terminate.aio,
             archive,
             (await Bot.get_url.aio()).rstrip("/"),
+            bot_state,
         )
         self.http_server = uvicorn.Server(
             uvicorn.Config(
@@ -79,15 +85,106 @@ class Bot:
         await self.display.wait()
 
 
+viewer_cookie = "meetings_viewer"
+login_html = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>meeting</title>
+    <style>
+      @font-face {{
+        font-family: "Inter Variable";
+        src: url("https://modal-cdn.com/fonts/inter-variable.woff2") format("woff2");
+        font-weight: 100 900;
+      }}
+      @font-face {{
+        font-family: "Goga";
+        src: url("https://modal-cdn.com/fonts/Goga-VariableVF.woff2") format("woff2");
+        font-weight: 100 900;
+      }}
+      :root {{
+        color-scheme: dark;
+        --ground: #181818;
+        --elevated: #232323;
+        --divider: #272727;
+        --heading: #ffffff;
+        --primary: #d1d1d1;
+        --tertiary: #747474;
+        --accent: #7fee64;
+        --accent-bg: #1d231c;
+        --sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--ground);
+        color: var(--primary);
+        font-family: var(--sans);
+        font-size: 14px;
+      }}
+      form {{
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        width: 18rem;
+        background: var(--elevated);
+        border: 1px solid var(--divider);
+        border-radius: 0.5rem;
+        padding: 1.25rem;
+      }}
+      input {{
+        font: inherit;
+        color: var(--primary);
+        background: var(--ground);
+        border: 1px solid var(--divider);
+        border-radius: 0.375rem;
+        padding: 0.5rem 0.75rem;
+      }}
+      input:focus {{ outline: none; border-color: var(--accent); }}
+      button {{
+        font: inherit;
+        font-weight: 500;
+        color: var(--accent);
+        background: var(--accent-bg);
+        border: 1px solid var(--accent-bg);
+        border-radius: 0.375rem;
+        padding: 0.5rem 0.75rem;
+        cursor: pointer;
+      }}
+      button:hover {{ border-color: var(--accent); }}
+    </style>
+  </head>
+  <body>
+    <form method="post" action="/login">
+      <input type="password" name="password" placeholder="password" autofocus />
+      <input type="hidden" name="next" value="{next}" />
+      <button type="submit">view</button>
+    </form>
+  </body>
+</html>"""
+
+
 @app.function(
     image=image,
     min_containers=1,
-    secrets=[modal.Secret.from_name("meetings-proxy")],
+    min_containers=1,
+    secrets=[
+        modal.Secret.from_name("meetings-proxy"),
+        modal.Secret.from_name("meetings-viewer"),
+    ],
 )
-@modal.asgi_app()
+@modal.asgi_app(custom_domains=["meet.modal.dev"])
 def launcher():
     from fastapi import FastAPI, Form, HTTPException, Request
-    from fastapi.responses import RedirectResponse
+    from fastapi.responses import (
+        HTMLResponse,
+        RedirectResponse,
+        StreamingResponse,
+    )
 
     api = FastAPI()
 
@@ -99,6 +196,37 @@ def launcher():
             os.environ["MODAL_PROXY_SECRET"],
         )
 
+    def proxy_headers() -> dict[str, str]:
+        return {
+            "Modal-Key": os.environ["MODAL_PROXY_KEY"],
+            "Modal-Secret": os.environ["MODAL_PROXY_SECRET"],
+        }
+
+    def viewer_token() -> str:
+        expiry = str(int(time.time()) + 7 * 86400)
+        sig = hmac.new(
+            os.environ.get("VIEWER_PASSWORD", "").encode(),
+            f"meetings-viewer:{expiry}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"{expiry}:{sig}"
+
+    def viewer_ok(request: Request) -> bool:
+        expiry, _, sig = request.cookies.get(viewer_cookie, "").partition(":")
+        return (
+            os.environ.get("VIEWER_PASSWORD", "") != ""
+            and expiry.isdigit()
+            and time.time() < int(expiry)
+            and hmac.compare_digest(
+                sig,
+                hmac.new(
+                    os.environ["VIEWER_PASSWORD"].encode(),
+                    f"meetings-viewer:{expiry}".encode(),
+                    hashlib.sha256,
+                ).hexdigest(),
+            )
+        )
+
     @api.post("/join")
     async def join(request: Request, meet: str = Form()):
         if not authed(request):
@@ -106,6 +234,25 @@ def launcher():
         meet = meet.strip()
         if not meet_link.fullmatch(meet):
             raise HTTPException(status_code=400, detail="not a google meet url")
+        previous = await bot_state.get.aio(f"active:{meet}")
+        if previous:
+            url, token, location, *rest = previous
+            link_id = rest[0] if rest else None
+            try:
+                async with httpx.AsyncClient(
+                    timeout=10, headers=proxy_headers()
+                ) as client:
+                    response = await client.get(
+                        f"{url}?modal_session_token={token}&token={token}&meet={meet}",
+                        follow_redirects=True,
+                    )
+            except Exception:
+                response = None
+            if response is not None and response.status_code == 200:
+                return RedirectResponse(location, status_code=303)
+            await bot_state.pop.aio(f"active:{meet}")
+            if link_id:
+                await bot_state.pop.aio(f"link:{link_id}")
         try:
             session = await asyncio.wait_for(
                 Bot.sessions.start.aio(idle_timeout=meeting_s), timeout=170
@@ -115,8 +262,112 @@ def launcher():
                 status_code=503, detail="session start timed out"
             ) from None
         url = (await Bot.get_url.aio()).rstrip("/") + "/"
-        location = f"{url}?{urlencode({'modal_session_token': session.token, 'token': session.token, 'meet': meet})}"
+        link_id = await bot_state.get.aio(f"meet_link:{meet}") or secrets.token_urlsafe(4)
+        link = f"https://meet.modal.dev/m/{link_id}"
+        location = f"{url}?{urlencode({'modal_session_token': session.token, 'token': session.token, 'meet': meet, 'link': link})}"
+        await bot_state.put.aio(f"link:{link_id}", location)
+        await bot_state.put.aio(f"meet_link:{meet}", link_id)
+        await bot_state.put.aio(
+            f"active:{meet}", (url, session.token, location, link_id)
+        )
         return RedirectResponse(location, status_code=303)
+
+    def checked_next(next: str) -> str:
+        if not next.startswith("/") or next.startswith("//"):
+            return "/"
+        return next
+
+    @api.get("/login")
+    async def login_page(next: str = "/"):
+        return HTMLResponse(
+            login_html.format(next=html.escape(checked_next(next), quote=True))
+        )
+
+    @api.post("/login")
+    async def login_submit(password: str = Form(), next: str = Form("/")):
+        next = checked_next(next)
+        if not os.environ.get("VIEWER_PASSWORD") or not hmac.compare_digest(
+            password, os.environ["VIEWER_PASSWORD"]
+        ):
+            await asyncio.sleep(1)
+            return HTMLResponse(
+                login_html.format(next=html.escape(next, quote=True)),
+                status_code=401,
+            )
+        response = RedirectResponse(next, status_code=303)
+        response.set_cookie(
+            viewer_cookie,
+            viewer_token(),
+            max_age=7 * 86400,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+        )
+        return response
+
+    @api.get("/m/{link_id}")
+    async def m(request: Request, link_id: str):
+        if not viewer_ok(request):
+            target = f"/m/{link_id}"
+            return RedirectResponse(
+                f"/login?{urlencode({'next': target})}", status_code=303
+            )
+        location = await bot_state.get.aio(f"link:{link_id}")
+        if not location:
+            raise HTTPException(status_code=404, detail="link not found")
+        try:
+            async with httpx.AsyncClient(timeout=30, headers=proxy_headers()) as client:
+                response = await client.get(location, follow_redirects=True)
+                response.raise_for_status()
+        except Exception:
+            raise HTTPException(status_code=502, detail="meeting unavailable") from None
+        return HTMLResponse(
+            response.text.replace(
+                'EventSource("events")', f'EventSource("/m/{link_id}/events")'
+            )
+        )
+
+    @api.get("/m/{link_id}/events")
+    async def m_events(request: Request, link_id: str):
+        if not viewer_ok(request):
+            raise HTTPException(status_code=401, detail="login required")
+        location = await bot_state.get.aio(f"link:{link_id}")
+        if not location:
+            raise HTTPException(status_code=404, detail="link not found")
+        base, _, query = location.partition("?")
+
+        async def stream():
+            async with httpx.AsyncClient(
+                timeout=None, headers=proxy_headers(), follow_redirects=True
+            ) as client:
+                async with client.stream("GET", f"{base}events?{query}") as upstream:
+                    async for chunk in upstream.aiter_raw():
+                        yield chunk
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @api.get("/m/{link_id}/screens/{file}")
+    async def m_screen(request: Request, link_id: str, file: str):
+        if not viewer_ok(request):
+            raise HTTPException(status_code=401, detail="login required")
+        location = await bot_state.get.aio(f"link:{link_id}")
+        if not location:
+            raise HTTPException(status_code=404, detail="link not found")
+        if location.startswith("archive:"):
+            meet = location[len("archive:") :]
+        else:
+            meet = dict(
+                pair.split("=", 1)
+                for pair in location.partition("?")[2].split("&")
+                if "=" in pair
+            ).get("meet", "")
+            meet = unquote(meet)
+        await archive.reload.aio()
+        name = await bot_state.get.aio(f"archive:{meet}")
+        path = Path("/archive/meetings") / (name or "") / "screens" / Path(file).name
+        if not name or not path.exists():
+            raise HTTPException(status_code=404, detail="screenshot not found")
+        return FileResponse(path)
 
     return api
 
