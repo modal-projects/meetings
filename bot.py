@@ -341,12 +341,25 @@ class Kimi:
             timeout=60,
         )
 
-    async def frame(self):
+    async def frame(self, person=None, presentation_only=False):
         try:
-            frame = await self.page.evaluate("""async () => {
+            frame = await self.page.evaluate("""async ({person, presentationOnly}) => {
+                const isPres = (tile) => [...tile.querySelectorAll('[aria-label]')].some(node =>
+                    /\\bpresentation\\b/i.test(node.getAttribute('aria-label')));
+                const nameOf = (tile) => {
+                    const pin = [...tile.querySelectorAll('[aria-label]')].map(n => n.getAttribute('aria-label') || '')
+                        .find(a => /pin\\s+.+\\s+to your main screen/i.test(a));
+                    const m = pin && pin.match(/pin\\s+(.+?)\\s+to your main screen/i);
+                    return tile.getAttribute('aria-label') || (m && m[1]) || '';
+                };
+                const want = (person || '').toLowerCase();
                 for (const tile of document.querySelectorAll('[data-participant-id]')) {
-                    if (![...tile.querySelectorAll('[aria-label]')].some(node =>
-                        /\\bpresentation\\b/i.test(node.getAttribute('aria-label')))) continue;
+                    if (isPres(tile)) {
+                        if (person) continue;
+                    } else {
+                        if (presentationOnly) continue;
+                        if (want && !nameOf(tile).toLowerCase().includes(want)) continue;
+                    }
                     const video = tile.querySelector('video');
                     if (!video || video.readyState < 2) continue;
                     if (!video.dataset.full) {
@@ -368,11 +381,11 @@ class Kimi:
                     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
                     return {
                         image: canvas.toDataURL('image/png'),
-                        presenter: tile.getAttribute('aria-label'),
+                        presenter: nameOf(tile),
                     };
                 }
                 return null;
-            }""")
+            }""", {"person": person, "presentationOnly": presentation_only})
         except Exception:
             logger.exception(
                 "session %s: frame capture failed", self.state["session"]
@@ -387,7 +400,7 @@ class Kimi:
         return frame
 
     async def capture(self):
-        frame = await self.frame()
+        frame = await self.frame(presentation_only=True)
         if not frame:
             return
         image = frame["image"]
@@ -619,11 +632,17 @@ class Kimi:
             return await self.page.evaluate("""async (persons) => {
                 const isPres = (tile) => [...tile.querySelectorAll('[aria-label]')].some(node =>
                     /\\bpresentation\\b/i.test(node.getAttribute('aria-label')));
+                const nameOf = (tile) => {
+                    const pin = [...tile.querySelectorAll('[aria-label]')].map(n => n.getAttribute('aria-label') || '')
+                        .find(a => /pin\\s+.+\\s+to your main screen/i.test(a));
+                    const m = pin && pin.match(/pin\\s+(.+?)\\s+to your main screen/i);
+                    return tile.getAttribute('aria-label') || (m && m[1]) || '';
+                };
                 const wants = (persons || []).map(p => p.toLowerCase());
                 const cells = [];
                 for (const tile of document.querySelectorAll('[data-participant-id]')) {
                     if (isPres(tile)) continue;
-                    const label = tile.getAttribute('aria-label') || '';
+                    const label = nameOf(tile);
                     if (wants.length && !wants.some(w => label.toLowerCase().includes(w))) continue;
                     const video = tile.querySelector('video');
                     if (!video || video.readyState < 2 || !video.videoWidth) continue;
