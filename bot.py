@@ -58,11 +58,41 @@ async def read_captions(region, transcript, blocks):
             continue
         previous = blocks.get(row["id"])
         if previous is not None and previous["speaker"] == row["speaker"]:
-            previous["text"] = row["text"]
+            full = previous["full"]
+            text = row["text"]
+            lcp = next(
+                (i for i, pair in enumerate(zip(full, text)) if pair[0] != pair[1]),
+                min(len(full), len(text)),
+            )
+            previous["full"] = text
+            if lcp < len(full) // 2 and len(text) < len(full) and text.strip():
+                previous["offset"] = 0
+            current = previous["entry"]
+            segment = text[previous["offset"] :]
+            while match := re.search(r"(?<=[.?!])\s+", segment):
+                rest = segment[match.end() :]
+                if not rest.strip():
+                    break
+                current["text"] = segment[: match.start()].strip()
+                previous["offset"] += match.end()
+                current = {
+                    "speaker": row["speaker"],
+                    "text": rest,
+                    "t": time.time(),
+                }
+                transcript.append(current)
+                previous["entry"] = current
+                segment = rest
+            current["text"] = segment.strip() or current["text"]
         else:
             entry = {"speaker": row["speaker"], "text": row["text"], "t": time.time()}
             transcript.append(entry)
-            blocks[row["id"]] = entry
+            blocks[row["id"]] = {
+                "full": row["text"],
+                "entry": entry,
+                "speaker": row["speaker"],
+                "offset": 0,
+            }
 
 
 profile_ignore_names = (
