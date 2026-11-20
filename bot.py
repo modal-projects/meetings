@@ -1451,9 +1451,7 @@ class Meetings:
             feed.set("LISTENING")
             kimi = Kimi(page, state, self.archive, feed)
             try:
-                await kimi.send(
-                    f"I'm Hal — ask me anything, out loud or in chat. {kimi.url}"
-                )
+                await kimi.send(f"Notes: {kimi.url}")
             except Exception:
                 logger.exception("session %s: join notice failed", state["session"])
             responder = asyncio.create_task(kimi.run())
