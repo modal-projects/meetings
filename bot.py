@@ -918,6 +918,19 @@ class Meetings:
                 try:
                     await read_captions(captions, state["transcript"], blocks)
                     await kimi.poll()
+                    state["participants"] = sorted(
+                        set(
+                            await page.evaluate(
+                                """() => [...document.querySelectorAll('[data-participant-id]')]
+                                    .map(t => t.getAttribute('aria-label')).filter(Boolean)"""
+                            )
+                        )
+                        | {
+                            e["speaker"]
+                            for e in state["transcript"] + state["chat"]
+                            if e["speaker"] != "Participant"
+                        }
+                    )
                 except Exception:
                     logger.exception("session %s: poll failed", state["session"])
                 try:
