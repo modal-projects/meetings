@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>meeting</title>
+    <style>
+      @font-face {
+        font-family: "Inter Variable";
+        src: url("https://modal-cdn.com/fonts/inter-variable.woff2") format("woff2");
+        font-weight: 100 900;
+      }
+      @font-face {
+        font-family: "Goga";
+        src: url("https://modal-cdn.com/fonts/Goga-VariableVF.woff2") format("woff2");
+        font-weight: 100 900;
+      }
+      :root {
+        color-scheme: dark;
+        --ground: #181818;
+        --elevated: #232323;
+        --divider: #272727;
+        --heading: #ffffff;
+        --primary: #d1d1d1;
+        --secondary: #bababa;
+        --tertiary: #747474;
+        --accent: #7fee64;
+        --accent-bg: #1d231c;
+        --info: #79a4c4;
+        --info-bg: #2a3238;
+        --sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+        --mono: "Fira Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--ground);
+        color: var(--primary);
+        font-family: var(--sans);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .page {
+        max-width: 72rem;
+        margin: 0 auto;
+        padding: 2rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      h1 {
+        font-family: "Goga", var(--sans);
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: var(--heading);
+        margin: 0;
+      }
+      #status {
+        font-size: 0.75rem;
+        font-weight: 500;
+        padding: 0.125rem 0.625rem;
+        border-radius: 999px;
+        border: 1px solid var(--divider);
+        color: var(--secondary);
+      }
+      #status[data-status="joining"] { color: var(--info); background: var(--info-bg); border-color: var(--info-bg); }
+      #status[data-status="in"] { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-bg); }
+      .meta {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+        font-family: var(--mono);
+        font-size: 0.75rem;
+        color: var(--tertiary);
+      }
+      .meta a { color: var(--accent); text-decoration: none; }
+      .meta a:hover { text-decoration: underline; }
+      .panes {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 1rem;
+      }
+      @media (min-width: 56rem) {
+        .panes { grid-template-columns: 3fr 2fr; }
+      }
+      section {
+        background: var(--elevated);
+        border: 1px solid var(--divider);
+        border-radius: 0.5rem;
+        padding: 1rem 1.25rem;
+        min-width: 0;
+      }
+      h2 {
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--tertiary);
+        margin: 0 0 0.75rem;
+      }
+      .entries {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        max-height: 32rem;
+        overflow-y: auto;
+      }
+      .entry { margin: 0; }
+      .entry .speaker {
+        font-weight: 600;
+        color: var(--heading);
+      }
+      .entry.hal .speaker { color: var(--accent); }
+      .empty { color: var(--tertiary); font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header>
+        <h1>meeting</h1>
+        <span id="status" data-status="connecting">connecting</span>
+      </header>
+      <div class="meta">
+        <a id="meet" href="#"></a>
+        <span id="session"></span>
+        <span id="started"></span>
+        <span id="error"></span>
+      </div>
+      <div class="panes">
+        <section>
+          <h2>transcript</h2>
+          <div id="transcript" class="entries" role="log" aria-live="polite"></div>
+        </section>
+        <section>
+          <h2>chat</h2>
+          <div id="chat" class="entries" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+    </div>
+    <script>
+      const events = new EventSource("events");
+      events.onmessage = (event) => {
+        const { transcript = [], chat = [], ...state } = JSON.parse(event.data);
+        const status = document.getElementById("status");
+        status.textContent = state.status;
+        status.dataset.status = state.status;
+        const meet = document.getElementById("meet");
+        meet.textContent = state.meet;
+        meet.href = state.meet;
+        document.getElementById("session").textContent = state.session;
+        document.getElementById("started").textContent =
+          new Date(state.started * 1000).toLocaleTimeString();
+        document.getElementById("error").textContent = state.error || "";
+        for (const [id, entries] of Object.entries({ transcript, chat })) {
+          const pane = document.getElementById(id);
+          if (!entries.length) {
+            pane.replaceChildren(Object.assign(document.createElement("p"), {
+              className: "empty", textContent: "nothing yet",
+            }));
+            continue;
+          }
+          pane.replaceChildren(...entries.map(entry => {
+            const line = document.createElement("p");
+            line.className = `entry${entry.speaker === "Hal" ? " hal" : ""}`;
+            const speaker = document.createElement("span");
+            speaker.className = "speaker";
+            speaker.textContent = entry.speaker;
+            line.append(speaker, ` ${entry.text}`);
+            return line;
+          }));
+          pane.scrollTop = pane.scrollHeight;
+        }
+        if (state.status === "left") events.close();
+      };
+    </script>
+  </body>
+</html>

@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 import modal
@@ -6,8 +7,9 @@ import modal
 root = Path(__file__).resolve().parent
 meeting_s = 4 * 3600
 app = modal.App("meetings")
-profile = modal.Volume.from_name(
-    "meetings-chrome-profile", create_if_missing=True, environment_name="demos"
+profile = modal.Volume.from_name("meetings-chrome-profile", create_if_missing=True)
+archive = modal.Volume.from_name(
+    "meetings-archive", create_if_missing=True, environment_name="demos"
 )
 image = (
     modal.Image.debian_slim(python_version="3.13")
@@ -17,8 +19,51 @@ image = (
         "curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /chrome.deb && apt-get update && apt-get install -y /chrome.deb && rm /chrome.deb",
         "useradd --create-home chrome",
     )
+    .add_local_dir(root / "web", "/meetings/web", copy=True)
     .add_local_python_source("app", "bot")
 )
+
+
+@app.server(
+    image=image,
+    port=8000,
+    min_containers=1,
+    max_concurrency=4,
+    cpu=8,
+    memory=8192,
+    volumes={"/profile": profile, "/archive": archive},
+    secrets=[modal.Secret.from_name("meetings-endpoints")],
+    compute_region="us-east",
+)
+@modal.sessioned()
+class Bot:
+    @modal.enter()
+    async def enter(self):
+        import uvicorn
+
+        from bot import Meetings, start_display
+
+        self.display = await start_display()
+        self.meetings = Meetings(
+            Bot.sessions.terminate.aio,
+            archive,
+            (await Bot.get_url.aio()).rstrip("/"),
+        )
+        self.http_server = uvicorn.Server(
+            uvicorn.Config(
+                self.meetings.api, host="0.0.0.0", port=8000, access_log=False
+            )
+        )
+        self.server_task = asyncio.create_task(self.http_server.serve())
+
+    @modal.exit()
+    async def exit(self):
+        await self.meetings.close()
+        self.http_server.should_exit = True
+        await self.server_task
+        with suppress(ProcessLookupError):
+            self.display.terminate()
+        await self.display.wait()
 
 
 @app.function(
