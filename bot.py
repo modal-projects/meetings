@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -284,6 +286,7 @@ class Kimi:
         self.synced = page.frame_locator('iframe[src*="chat.google.com"]')
         self.dumped = False
         self.mode = None
+        self.last_screen = None
 
     async def model_id(self, client):
         if self.model is None:
@@ -301,6 +304,95 @@ class Kimi:
                 "Modal-Routing-Affinity-Key": self.state["session"],
             },
             timeout=60,
+        )
+
+    async def frame(self):
+        try:
+            return await self.page.evaluate("""async () => {
+                for (const tile of document.querySelectorAll('[data-participant-id]')) {
+                    if (![...tile.querySelectorAll('[aria-label]')].some(node =>
+                        /\\bpresentation\\b/i.test(node.getAttribute('aria-label')))) continue;
+                    const video = tile.querySelector('video');
+                    if (!video || video.readyState < 2) continue;
+                    if (!video.dataset.full) {
+                        const pin = [...tile.querySelectorAll('[aria-label]')].find(node =>
+                            /^\\s*pin\\b/i.test(node.getAttribute('aria-label')));
+                        if (pin && pin.tagName !== 'VIDEO') pin.click();
+                        video.dataset.full = '1';
+                    }
+                    const start = Date.now();
+                    while (video.videoWidth < 640 && Date.now() - start < 8000)
+                        await new Promise((r) => setTimeout(r, 400));
+                    if (!video.videoWidth || !video.videoHeight) continue;
+                    const scale = Math.min(1, 1280 / video.videoWidth, 720 / video.videoHeight);
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+                    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+                    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+                    return {
+                        image: canvas.toDataURL('image/png'),
+                        presenter: tile.getAttribute('aria-label'),
+                    };
+                }
+                return null;
+            }""")
+        except Exception:
+            logger.exception(
+                "session %s: presentation capture failed", self.state["session"]
+            )
+            return None
+
+    async def content(self, text, include_image=True):
+        if frame := include_image and await self.frame():
+            return [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": frame["image"]}},
+            ]
+        return text
+
+    async def capture(self):
+        frame = await self.frame()
+        if not frame:
+            return
+        image = frame["image"]
+        png = base64.b64decode(image.split(",", 1)[1])
+        if (digest := hashlib.md5(png).hexdigest()) == self.last_screen:
+            return
+        self.last_screen = digest
+        directory = archive_dir(self.state) / "screens"
+        await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
+        name = f"{len(self.state['screens'])}.png"
+        await asyncio.to_thread((directory / name).write_bytes, png)
+        async with self.client() as client:
+            response = await client.post(
+                "chat/completions",
+                json={
+                    "model": await self.model_id(client),
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Describe this shared screen in one sentence.",
+                                },
+                                {"type": "image_url", "image_url": {"url": image}},
+                            ],
+                        }
+                    ],
+                    "max_tokens": 128,
+                    "chat_template_kwargs": {"thinking": False},
+                },
+            )
+            response.raise_for_status()
+        desc = (response.json()["choices"][0]["message"].get("content") or "").strip()
+        self.state["screens"].append(
+            {
+                "t": time.time(),
+                "speaker": frame.get("presenter"),
+                "desc": desc,
+                "file": f"screens/{name}",
+            }
         )
 
     async def chat(self):
@@ -490,11 +582,13 @@ class Kimi:
                         },
                         {
                             "role": "user",
-                            "content": json.dumps(
-                                {
-                                    "recent": recent,
-                                    "addressed_to_you": questions,
-                                }
+                            "content": await self.content(
+                                json.dumps(
+                                    {
+                                        "recent": recent,
+                                        "addressed_to_you": questions,
+                                    }
+                                )
                             ),
                         },
                     ]
@@ -592,6 +686,7 @@ class Meetings:
                     "started": time.time(),
                     "transcript": [],
                     "chat": [],
+                    "screens": [],
                 }
                 self.status(self.states[session], "joining")
                 self.tasks[session] = asyncio.create_task(self.run(session))
@@ -784,7 +879,7 @@ class Meetings:
             stage = "participants"
             blocks = {}
             seen_others = False
-            flushed = time.monotonic()
+            flushed = screened = time.monotonic()
             while True:
                 try:
                     await read_captions(captions, state["transcript"], blocks)
@@ -820,6 +915,14 @@ class Meetings:
                 if alone:
                     break
                 now = time.monotonic()
+                if now - screened >= 30:
+                    screened = now
+                    try:
+                        await kimi.capture()
+                    except Exception:
+                        logger.exception(
+                            "session %s: screen capture failed", state["session"]
+                        )
                 if now - flushed >= 60:
                     flushed = now
                     try:
