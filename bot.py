@@ -21,6 +21,7 @@ from playwright.async_api import async_playwright
 logger = logging.getLogger(__name__)
 wake_word = re.compile(r"\b(?:hal|hall|haal|howl)\b", re.I)
 own_speaker = re.compile(r"hal\b(?!-)", re.I)
+recap_word = re.compile(r"\b(?:recap|wrap\s?up|summar(?:y|ize))\b", re.I)
 
 skip_tags = frozenset({"script", "style", "head", "noscript", "template"})
 max_page_chars = 40_000
@@ -564,6 +565,36 @@ class Kimi:
             case _:
                 return f"unknown tool: {name}"
 
+    async def recap(self, client):
+        response = await client.post(
+            "chat/completions",
+            json={
+                "model": await self.model_id(client),
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are Hal, an AI participant in this Google Meet. Write a concise meeting recap as a markdown bullet list of key points and action items; no headings or preamble.",
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "transcript": self.state["transcript"],
+                                "chat": self.state["chat"],
+                                "screens": self.state["screens"],
+                            }
+                        ),
+                    },
+                ],
+                "max_tokens": 2048,
+                "chat_template_kwargs": {"thinking": False},
+            },
+        )
+        response.raise_for_status()
+        reply = (response.json()["choices"][0]["message"].get("content") or "").strip()
+        self.state["recap"] = reply
+        return reply
+
     async def run(self):
         async with self.client() as client:
             while True:
@@ -571,6 +602,9 @@ class Kimi:
                 self.ready.clear()
                 questions, self.pending = self.pending, []
                 try:
+                    if any(recap_word.search(entry["text"]) for entry in questions):
+                        await self.recap(client)
+                        continue
                     recent = sorted(
                         self.state["transcript"][-30:] + self.state["chat"][-30:],
                         key=lambda entry: entry["t"],
@@ -913,6 +947,11 @@ class Meetings:
                         <= 1
                     )
                 if alone:
+                    try:
+                        async with kimi.client() as client:
+                            await kimi.recap(client)
+                    except Exception:
+                        logger.exception("session %s: recap failed", state["session"])
                     break
                 now = time.monotonic()
                 if now - screened >= 30:
