@@ -171,7 +171,7 @@ login_html = """<!doctype html>
 @app.function(
     image=image,
     min_containers=1,
-    min_containers=1,
+    volumes={"/archive": archive},
     secrets=[
         modal.Secret.from_name("meetings-proxy"),
         modal.Secret.from_name("meetings-viewer"),
@@ -315,6 +315,17 @@ def launcher():
         location = await bot_state.get.aio(f"link:{link_id}")
         if not location:
             raise HTTPException(status_code=404, detail="link not found")
+        if location.startswith("archive:"):
+            await archive.reload.aio()
+            name = await bot_state.get.aio(f"archive:{location[len('archive:') :]}")
+            path = Path("/archive/meetings") / (name or "") / "state.json"
+            if not name or not path.exists():
+                raise HTTPException(status_code=404, detail="archive not found")
+            return HTMLResponse(
+                (Path("/meetings/web") / "meeting.html")
+                .read_text()
+                .replace('EventSource("events")', f'EventSource("/m/{link_id}/events")')
+            )
         try:
             async with httpx.AsyncClient(timeout=30, headers=proxy_headers()) as client:
                 response = await client.get(location, follow_redirects=True)
@@ -334,6 +345,16 @@ def launcher():
         location = await bot_state.get.aio(f"link:{link_id}")
         if not location:
             raise HTTPException(status_code=404, detail="link not found")
+        if location.startswith("archive:"):
+            await archive.reload.aio()
+            name = await bot_state.get.aio(f"archive:{location[len('archive:') :]}")
+            path = Path("/archive/meetings") / (name or "") / "state.json"
+
+            async def archived():
+                if name and path.exists():
+                    yield f"data: {path.read_text()}\n\n"
+
+            return StreamingResponse(archived(), media_type="text/event-stream")
         base, _, query = location.partition("?")
 
         async def stream():
