@@ -805,10 +805,11 @@ class Meetings:
         state["status"] = status
         print(json.dumps({"session": state["session"], "status": status}), flush=True)
 
-    def __init__(self, terminate, archive, base_url):
+    def __init__(self, terminate, archive, base_url, bot_state):
         self.terminate = terminate
         self.archive = archive
         self.base_url = base_url
+        self.bot_state = bot_state
         self.states = {}
         self.tokens = {}
         self.tasks = {}
@@ -843,7 +844,9 @@ class Meetings:
             async def stream():
                 previous = ""
                 while not await request.is_disconnected():
-                    state = self.states[session]
+                    state = self.states.get(session)
+                    if state is None:
+                        return
                     payload = json.dumps(state)
                     if payload != previous:
                         previous = payload
@@ -868,7 +871,13 @@ class Meetings:
             logger.exception("session %s failed", session)
         finally:
             self.status(state, "left")
-            await self.terminate(self.tokens.pop(session))
+            token = self.tokens.pop(session)
+            await self.terminate(token)
+            entry = await self.bot_state.get.aio(f"active:{state['meet']}")
+            if entry and entry[1] == token:
+                await self.bot_state.pop.aio(f"active:{state['meet']}")
+                if len(entry) > 3:
+                    await self.bot_state.pop.aio(f"link:{entry[3]}")
 
     async def join(self, playwright, directory, state):
         context = None
