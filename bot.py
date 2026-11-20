@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
+import avatar
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from html.parser import HTMLParser
@@ -49,6 +50,7 @@ chrome_ua = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
+
 class HTMLTextStripper(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -69,10 +71,12 @@ class HTMLTextStripper(HTMLParser):
         if stripped := data.strip():
             self.parts.append(stripped)
 
+
 def strip_html(text):
     stripper = HTMLTextStripper()
     stripper.feed(text)
     return "\n".join(stripper.parts)
+
 
 async def fetch_text(url):
     async with httpx.AsyncClient(
@@ -89,6 +93,7 @@ async def fetch_text(url):
     if len(text) > max_page_chars:
         text = text[:max_page_chars] + f"\n\n[truncated to {max_page_chars} chars]"
     return text
+
 
 def tools():
     offered = [
@@ -152,8 +157,10 @@ def tools():
     ]
     return offered
 
+
 browser_args = [
     "--use-fake-ui-for-media-stream",
+    "--use-fake-device-for-media-stream",
     "--autoplay-policy=no-user-gesture-required",
     "--window-size=1920,1080",
     "--window-position=0,0",
@@ -162,6 +169,7 @@ browser_args = [
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--profile-directory=Profile 1",
 ]
+
 
 async def start_display():
     process = await asyncio.create_subprocess_exec(
@@ -173,6 +181,7 @@ async def start_display():
                 raise RuntimeError("display failed to start")
             await asyncio.sleep(0.1)
     return process
+
 
 async def read_captions(region, transcript, blocks):
     rows = await region.evaluate("""region => {
@@ -229,6 +238,7 @@ async def read_captions(region, transcript, blocks):
                 "offset": 0,
             }
 
+
 profile_ignore_names = (
     "Singleton*",
     "Cache",
@@ -259,6 +269,7 @@ profile_ignore_names = (
 )
 profile_ignore = shutil.ignore_patterns(*profile_ignore_names)
 
+
 async def copy_profile(directory):
     started = time.monotonic()
     await asyncio.to_thread(
@@ -277,6 +288,7 @@ async def copy_profile(directory):
         ),
         flush=True,
     )
+
 
 async def debug_dump(page, archive, session, stage):
     try:
@@ -314,11 +326,13 @@ async def debug_dump(page, archive, session, stage):
     except Exception:
         logger.exception("debug capture failed for %s", session)
 
+
 class Kimi:
-    def __init__(self, page, state, archive):
+    def __init__(self, page, state, archive, feed):
         self.page = page
         self.state = state
         self.archive = archive
+        self.feed = feed
         self.url = state["url"]
         self.sent = set()
         self.seen = set()
@@ -863,6 +877,7 @@ class Kimi:
                         "session %s: gate failed", self.state["session"]
                     )
                     continue
+                self.feed.set("ANSWERING")
                 messages = [
                     {
                         "role": "system",
@@ -950,11 +965,13 @@ class Kimi:
                             ),
                             flush=True,
                         )
+                        self.feed.set("LISTENING")
                         continue
                 except Exception:
                     logger.exception(
                         "session %s: Kimi reply failed", self.state["session"]
                     )
+                    self.feed.set("LISTENING")
                     for entry in questions:
                         entry["tries"] = entry.get("tries", 0) + 1
                         if entry["tries"] <= 3:
@@ -970,6 +987,7 @@ class Kimi:
                     logger.exception(
                         "session %s: delivery failed", self.state["session"]
                     )
+                self.feed.set("LISTENING")
                 print(
                     json.dumps(
                         {
@@ -981,6 +999,7 @@ class Kimi:
                     ),
                     flush=True,
                 )
+                self.feed.set("LISTENING")
 
 
 def archive_dir(state):
@@ -988,6 +1007,7 @@ def archive_dir(state):
         Path("/archive/meetings")
         / f"{state['meet'].rsplit('/', 1)[-1]}-{state['session']}"
     )
+
 
 class Meetings:
     def status(self, state, status):
@@ -1095,6 +1115,7 @@ class Meetings:
         page = None
         responder = None
         stage = "launch"
+        feed = avatar.Feed(avatar.feed_path(state["session"]))
         try:
             context = await playwright.chromium.launch_persistent_context(
                 directory,
@@ -1102,7 +1123,8 @@ class Meetings:
                 ignore_default_args=["--enable-automation"],
                 headless=False,
                 no_viewport=True,
-                args=browser_args,
+                args=browser_args
+                + [f"--use-file-for-fake-video-capture={feed.path}"],
                 env={**os.environ, "DISPLAY": ":99"},
                 permissions=["camera", "microphone"],
             )
@@ -1217,7 +1239,8 @@ class Meetings:
                     break
                 except PlaywrightTimeoutError:
                     pass
-            kimi = Kimi(page, state, self.archive)
+            feed.set("LISTENING")
+            kimi = Kimi(page, state, self.archive, feed)
             try:
                 await kimi.send(
                     f"I'm Hal — ask me anything, out loud or in chat. {kimi.url}"
@@ -1306,11 +1329,13 @@ class Meetings:
                 await debug_dump(page, self.archive, state["session"], stage)
             raise
         finally:
+            feed.set("LISTENING")
             if responder is not None:
                 responder.cancel()
                 await asyncio.gather(responder, return_exceptions=True)
             if context is not None:
                 await context.close()
+            feed.close()
 
     async def close(self):
         for task in self.tasks.values():
