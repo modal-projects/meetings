@@ -121,6 +121,9 @@ def launcher():
     return api
 
 
+organizer = re.compile(r"(?m)^Organizer\n[^\n]*\n\S+@modal\.com\s*$")
+
+
 def reminder_meet_url(message: dict) -> str | None:
     for file in message.get("files", []):
         if (
@@ -132,7 +135,7 @@ def reminder_meet_url(message: dict) -> str | None:
             and file.get("subject", "").startswith("Notification:")
         ):
             body = file.get("plain_text") or file.get("preview", "")
-            if match := meet_link.search(body):
+            if (match := meet_link.search(body)) and organizer.search(body):
                 return match.group(0)
     return None
 
