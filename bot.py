@@ -529,6 +529,33 @@ class Kimi:
                 {"speaker": "Hal", "text": text, "t": time.time()}
             )
 
+    async def update_participants(self):
+        self.state["participants"] = sorted(
+            set(self.state.get("participants") or [])
+            | {
+                name
+                for name in set(
+                    await self.page.evaluate(
+                        """() => [...document.querySelectorAll('[data-participant-id]')]
+                            .filter(t => ![...t.querySelectorAll('[aria-label]')].some(n =>
+                                /\\bpresentation\\b/i.test(n.getAttribute('aria-label'))))
+                            .map(t => {
+                                const pin = [...t.querySelectorAll('[aria-label]')].map(n => n.getAttribute('aria-label') || '')
+                                    .find(a => /pin\\s+.+\\s+to your main screen/i.test(a));
+                                const m = pin && pin.match(/pin\\s+(.+?)\\s+to your main screen/i);
+                                return t.getAttribute('aria-label') || (m && m[1]) || '';
+                            }).filter(Boolean)"""
+                    )
+                )
+                | {
+                    e["speaker"]
+                    for e in self.state["transcript"] + self.state["chat"]
+                    if e["speaker"] != "Participant"
+                }
+                if not own_speaker.search(name)
+            }
+        )
+
     def consider(self, entry):
         self.pending.append(entry)
         self.ready.set()
@@ -1215,6 +1242,7 @@ class Meetings:
                 try:
                     await read_captions(captions, state["transcript"], blocks)
                     await kimi.poll()
+                    await kimi.update_participants()
                 except Exception:
                     logger.exception("session %s: poll failed", state["session"])
                 try:

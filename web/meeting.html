@@ -47,47 +47,42 @@
         display: flex;
         flex-direction: column;
         gap: 1.5rem;
+        height: 100vh;
       }
-      header {
-        display: flex;
-        align-items: baseline;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-      }
-      h1 {
-        font-family: "Goga", var(--sans);
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: var(--heading);
-        margin: 0;
-      }
-      #status {
-        font-size: 0.75rem;
-        font-weight: 500;
-        padding: 0.125rem 0.625rem;
-        border-radius: 999px;
-        border: 1px solid var(--divider);
-        color: var(--secondary);
-      }
-      #status[data-status="joining"] { color: var(--info); background: var(--info-bg); border-color: var(--info-bg); }
-      #status[data-status="in"] { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-bg); }
       .meta {
         display: flex;
+        justify-content: space-between;
+        align-items: center;
         gap: 1rem;
-        flex-wrap: wrap;
         font-family: var(--mono);
         font-size: 0.75rem;
         color: var(--tertiary);
       }
+      .meta .fields { display: flex; flex-direction: column; gap: 0.25rem; }
+      .meta label { color: var(--tertiary); }
+      .meta .value { color: var(--secondary); }
       .meta a { color: var(--accent); text-decoration: none; }
       .meta a:hover { text-decoration: underline; }
+      .spinner {
+        margin-right: 0.5rem;
+        width: 1rem;
+        height: 1rem;
+        border: 2px solid var(--divider);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
       .panes {
         display: grid;
         grid-template-columns: 1fr;
+        grid-template-rows: repeat(4, minmax(0, 1fr));
         gap: 1rem;
+        flex: 1;
+        min-height: 0;
       }
       @media (min-width: 56rem) {
-        .panes { grid-template-columns: 3fr 2fr; }
+        .panes { grid-template-columns: 1fr 1fr; grid-template-rows: repeat(2, minmax(0, 1fr)); }
       }
       section {
         background: var(--elevated);
@@ -95,6 +90,8 @@
         border-radius: 0.5rem;
         padding: 1rem 1.25rem;
         min-width: 0;
+        display: flex;
+        flex-direction: column;
       }
       h2 {
         font-size: 0.75rem;
@@ -108,56 +105,111 @@
         display: flex;
         flex-direction: column;
         gap: 0.5rem;
-        max-height: 32rem;
+        flex: 1;
+        min-height: 0;
         overflow-y: auto;
       }
       .entry { margin: 0; }
+      .entry p, .entry ul, .entry ol { margin: 0; }
+      .entry ul, .entry ol { padding-left: 1.25rem; }
       .entry .speaker {
         font-weight: 600;
         color: var(--heading);
       }
+      .entry a.shot { display: block; }
+      .entry a.shot img { max-height: 6rem; border-radius: 0.25rem; margin-top: 0.25rem; }
+      .entry a.shot.loading { height: 6rem; width: 8rem; margin-top: 0.25rem; border-radius: 0.25rem; background: var(--elevated); animation: pulse 1.2s ease-in-out infinite; }
+      .entry a.shot.loading img { display: none; }
+      .entry .t {
+        font-family: var(--mono);
+        font-size: 0.75rem;
+        color: var(--tertiary);
+      }
       .entry.hal .speaker { color: var(--accent); }
       .empty { color: var(--tertiary); font-style: italic; }
+      .loading {
+        display: inline-block;
+        height: 0.75rem;
+        border-radius: 0.25rem;
+        background: var(--divider);
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes pulse { 50% { opacity: 0.5; } }
     </style>
   </head>
   <body>
     <div class="page">
-      <header>
-        <h1>meeting</h1>
-        <span id="status" data-status="connecting">connecting</span>
-      </header>
       <div class="meta">
-        <a id="meet" href="#"></a>
-        <span id="session"></span>
-        <span id="started"></span>
-        <span id="error"></span>
+        <div class="fields">
+          <a id="meet" href="#"><span class="loading" style="width: 14rem"></span></a>
+          <span><label>Participants:</label> <span id="participants" class="value"><span class="loading" style="width: 10rem"></span></span></span>
+          <span>
+            <label>Start time:</label> <span id="started" class="value"><span class="loading" style="width: 5rem"></span></span>,
+            <label>Elapsed:</label> <span id="elapsed" class="value"><span class="loading" style="width: 2.5rem"></span></span>
+          </span>
+          <span id="error"></span>
+        </div>
+        <div id="spinner" class="spinner" hidden></div>
       </div>
       <div class="panes">
         <section>
+          <h2>recap</h2>
+          <div id="recap" class="entries" role="log" aria-live="polite"><p><span class="loading" style="width: 60%"></span></p></div>
+        </section>
+        <section>
+          <h2>screenshots</h2>
+          <div id="screens" class="entries" role="log" aria-live="polite"><p><span class="loading" style="width: 60%"></span></p></div>
+        </section>
+        <section>
           <h2>transcript</h2>
-          <div id="transcript" class="entries" role="log" aria-live="polite"></div>
+          <div id="transcript" class="entries" role="log" aria-live="polite"><p><span class="loading" style="width: 60%"></span></p></div>
         </section>
         <section>
           <h2>chat</h2>
-          <div id="chat" class="entries" role="log" aria-live="polite"></div>
+          <div id="chat" class="entries" role="log" aria-live="polite"><p><span class="loading" style="width: 60%"></span></p></div>
         </section>
       </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/marked@16/lib/marked.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
     <script>
+      const md = (text) => DOMPurify.sanitize(marked.parseInline(text || ""));
+      let started = 0, ended = 0;
+      setInterval(() => {
+        if (!started) return;
+        const s = Math.max(0, Math.floor((ended || Date.now() / 1000) - started));
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        document.getElementById("elapsed").textContent =
+          `${h ? `${h}:${String(m).padStart(2, "0")}` : m}:${String(sec).padStart(2, "0")}`;
+      }, 1000);
       const events = new EventSource("events");
       events.onmessage = (event) => {
-        const { transcript = [], chat = [], ...state } = JSON.parse(event.data);
-        const status = document.getElementById("status");
-        status.textContent = state.status;
-        status.dataset.status = state.status;
+        const { transcript = [], chat = [], screens = [], ...state } = JSON.parse(event.data);
         const meet = document.getElementById("meet");
         meet.textContent = state.meet;
         meet.href = state.meet;
-        document.getElementById("session").textContent = state.session;
+        document.getElementById("participants").textContent =
+          (state.participants || []).join(", ");
         document.getElementById("started").textContent =
           new Date(state.started * 1000).toLocaleTimeString();
-        document.getElementById("error").textContent = state.error || "";
-        for (const [id, entries] of Object.entries({ transcript, chat })) {
+        started = state.started;
+        document.getElementById("error").textContent =
+          state.status === "left" ? "" : state.error || "";
+        if (state.status === "left") {
+          ended = Math.max(
+            state.started,
+            ...transcript.concat(chat, screens).map(e => e.t ?? 0)
+          );
+          document.getElementById("spinner").hidden = true;
+        } else {
+          document.getElementById("spinner").hidden = false;
+        }
+        const pane = document.getElementById("recap");
+        pane.replaceChildren(Object.assign(document.createElement("p"), {
+          className: state.recap ? "entry" : "empty",
+          innerHTML: state.recap ? DOMPurify.sanitize(marked.parse(state.recap)) : "nothing yet",
+        }));
+        for (const [id, entries] of Object.entries({ transcript, chat, screens })) {
           const pane = document.getElementById(id);
           if (!entries.length) {
             pane.replaceChildren(Object.assign(document.createElement("p"), {
@@ -168,10 +220,26 @@
           pane.replaceChildren(...entries.map(entry => {
             const line = document.createElement("p");
             line.className = `entry${entry.speaker === "Hal" ? " hal" : ""}`;
+            const text = document.createElement("span");
+            text.innerHTML = md(entry.text ?? entry.desc);
+            const t = document.createElement("span");
+            t.className = "t";
+            t.textContent = `[${new Date(entry.t * 1000).toLocaleTimeString()}]`;
             const speaker = document.createElement("span");
             speaker.className = "speaker";
-            speaker.textContent = entry.speaker;
-            line.append(speaker, ` ${entry.text}`);
+            speaker.textContent = entry.speaker ?? "";
+            line.append(t, " ", speaker, entry.speaker ? ": " : " ", text);
+            if (id === "screens" && entry.file) {
+              const a = document.createElement("a");
+              a.href = `/m/${window.location.pathname.split("/")[2]}/${entry.file}`;
+              a.className = "shot loading";
+              const img = document.createElement("img");
+              img.src = a.href;
+              img.onload = () => a.classList.remove("loading");
+              img.onerror = () => a.remove();
+              a.append(img);
+              line.append(document.createElement("br"), a);
+            }
             return line;
           }));
           pane.scrollTop = pane.scrollHeight;

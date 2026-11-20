@@ -181,6 +181,7 @@ login_html = """<!doctype html>
 def launcher():
     from fastapi import FastAPI, Form, HTTPException, Request
     from fastapi.responses import (
+        FileResponse,
         HTMLResponse,
         RedirectResponse,
         StreamingResponse,
