@@ -895,12 +895,17 @@ class Meetings:
             self.states.pop(session, None)
             token = self.tokens.pop(session, None)
             if token:
-                await self.terminate(token)
+                try:
+                    await self.terminate(token)
+                except Exception:
+                    logger.exception("session %s: terminate failed", session)
             entry = await self.bot_state.get.aio(f"active:{state['meet']}")
             if entry and entry[1] == token:
                 await self.bot_state.pop.aio(f"active:{state['meet']}")
                 if len(entry) > 3:
-                    await self.bot_state.pop.aio(f"link:{entry[3]}")
+                    await self.bot_state.put.aio(
+                        f"link:{entry[3]}", f"archive:{state['meet']}"
+                    )
 
     async def join(self, playwright, directory, state):
         context = None
