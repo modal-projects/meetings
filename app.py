@@ -9,7 +9,7 @@ import secrets
 import time
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 
 import httpx
 import modal
@@ -305,6 +305,71 @@ def launcher():
             samesite="lax",
         )
         return response
+
+    @api.get("/favicon.png")
+    async def favicon():
+        return FileResponse(Path("/meetings/web") / "favicon.png")
+
+    @api.get("/")
+    async def index(request: Request):
+        if not viewer_ok(request):
+            return RedirectResponse("/login", status_code=303)
+        return HTMLResponse(
+            (Path("/meetings/web") / "index.html").read_text()
+        )
+
+    @api.get("/meetings.json")
+    async def meetings_json(request: Request):
+        if not viewer_ok(request):
+            raise HTTPException(status_code=401, detail="login required")
+        await archive.reload.aio()
+        meetings = []
+        seen = set()
+        async for key in bot_state.keys.aio():
+            if not key.startswith("link:"):
+                continue
+            link_id = key[len("link:") :]
+            location = await bot_state.get.aio(key)
+            if not location:
+                continue
+            if location.startswith("archive:"):
+                meet = location[len("archive:") :]
+                if meet in seen:
+                    continue
+                seen.add(meet)
+                if meet in seen:
+                    continue
+                seen.add(meet)
+            else:
+                meet = dict(
+                    pair.split("=", 1)
+                    for pair in location.partition("?")[2].split("&")
+                    if "=" in pair
+                ).get("meet", "")
+            meet = unquote(meet)
+            name = await bot_state.get.aio(f"archive:{meet}")
+            path = Path("/archive/meetings") / (name or "") / "state.json"
+            if name and path.exists():
+                state = json.loads(path.read_text())
+                meetings.append(
+                    {
+                        "id": link_id,
+                        "meet": state.get("meet", meet),
+                        "started": state.get("started"),
+                        "participants": state.get("participants"),
+                        "status": state.get("status"),
+                    }
+                )
+            else:
+                meetings.append(
+                    {
+                        "id": link_id,
+                        "meet": meet,
+                        "status": "joining",
+                    }
+                )
+        meetings.sort(key=lambda m: m.get("started") or 0, reverse=True)
+        return meetings
 
     @api.get("/m/{link_id}")
     async def m(request: Request, link_id: str):
