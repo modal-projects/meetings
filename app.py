@@ -230,7 +230,7 @@ def launcher():
         )
 
     @api.post("/join")
-    async def join(request: Request, meet: str = Form()):
+    async def join(request: Request, meet: str = Form(), guests: str = Form("")):
         if not authed(request):
             raise HTTPException(status_code=401, detail="proxy auth required")
         meet = meet.strip()
@@ -266,7 +266,7 @@ def launcher():
         url = (await Bot.get_url.aio()).rstrip("/") + "/"
         link_id = await bot_state.get.aio(f"meet_link:{meet}") or secrets.token_urlsafe(4)
         link = f"https://meet.modal.dev/m/{link_id}"
-        location = f"{url}?{urlencode({'modal_session_token': session.token, 'token': session.token, 'meet': meet, 'link': link})}"
+        location = f"{url}?{urlencode({'modal_session_token': session.token, 'token': session.token, 'meet': meet, 'link': link, 'guests': guests})}"
         await bot_state.put.aio(f"link:{link_id}", location)
         await bot_state.put.aio(f"meet_link:{meet}", link_id)
         await bot_state.put.aio(
@@ -473,9 +473,10 @@ def launcher():
 
 
 organizer = re.compile(r"(?m)^Organizer\n[^\n]*\n\S+@modal\.com\s*$")
+guests_section = re.compile(r"(?ms)^Guests\s*\n(.*?)^View all event details")
 
 
-def reminder_meet_url(message: dict) -> str | None:
+def reminder(message: dict) -> tuple[str, list[str]] | None:
     for file in message.get("files", []):
         if (
             file.get("filetype") == "email"
@@ -487,15 +488,22 @@ def reminder_meet_url(message: dict) -> str | None:
         ):
             body = file.get("plain_text") or file.get("preview", "")
             if (match := meet_link.search(body)) and organizer.search(body):
-                return match.group(0)
+                guests = []
+                if (section := guests_section.search(body)):
+                    guests = [
+                        line.strip().removesuffix(" - organizer")
+                        for line in section.group(1).splitlines()
+                        if line.strip()
+                    ]
+                return match.group(0), guests
     return None
 
 
-def invite(url: str) -> None:
+def invite(url: str, guests: list[str]) -> None:
     launcher_url = launcher.get_web_url()
     httpx.post(
         f"{launcher_url.rstrip('/')}/join",
-        data={"meet": url},
+        data={"meet": url, "guests": "\n".join(guests)},
         headers={
             "X-Meetings-Key": os.environ["MODAL_PROXY_KEY"],
             "X-Meetings-Secret": os.environ["MODAL_PROXY_SECRET"],
@@ -534,13 +542,14 @@ def poll() -> None:
         ts = message["ts"]
         if float(ts) < time.time() - stale_s:
             continue
-        url = reminder_meet_url(message)
+        result = reminder(message)
+        url = result[0] if result else None
         if url and bot_state.get(f"notified:{url}") == ts:
             bot_state["cursor"] = ts
             continue
         if url:
             try:
-                invite(url)
+                invite(url, result[1])
                 bot_state[f"notified:{url}"] = ts
                 print(json.dumps({"event": "joined", "url": url, "ts": ts}))
             except Exception as exc:

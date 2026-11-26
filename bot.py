@@ -1220,7 +1220,9 @@ class Meetings:
         self.api = FastAPI()
 
         @self.api.get("/")
-        async def meeting(request: Request, meet: str, token: str, link: str = ""):
+        async def meeting(
+            request: Request, meet: str, token: str, link: str = "", guests: str = ""
+        ):
             session = request.headers.get("x-modal-server-session-id")
             if session is None:
                 raise HTTPException(status_code=404, detail="meeting not found")
@@ -1232,6 +1234,9 @@ class Meetings:
                     "url": link
                     or f"{self.base_url}/?{urlencode({'modal_session_token': token, 'token': token, 'meet': meet})}",
                     "started": time.time(),
+                    "participants": [
+                        guest.strip() for guest in guests.splitlines() if guest.strip()
+                    ],
                     "transcript": [],
                     "chat": [],
                     "screens": [],
