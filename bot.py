@@ -589,7 +589,12 @@ class Kimi:
                     for e in self.state["transcript"] + self.state["chat"]
                     if e["speaker"] != "Participant"
                 }
-                if not own_speaker.search(name)
+            }
+        )
+        self.state["participants"] = sorted(
+            {
+                "Hal 9000" if own_speaker.search(name) else name
+                for name in self.state["participants"]
             }
         )
 

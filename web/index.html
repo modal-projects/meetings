@@ -88,12 +88,7 @@
         font-size: 0.75rem;
         color: var(--tertiary);
       }
-      .meeting .status {
-        font-family: var(--mono);
-        font-size: 0.75rem;
-        color: var(--tertiary);
-      }
-      .meeting .status.live { color: var(--accent); }
+      .meeting .when.live { color: var(--accent); }
       .empty { color: var(--tertiary); font-style: italic; }
       .skeleton {
         display: flex;
@@ -148,14 +143,11 @@
             who.className = "who";
             who.textContent = (m.participants || []).join(", ");
             const when = document.createElement("span");
-            when.className = "when";
+            when.className = `when${m.status !== "left" ? " live" : ""}`;
             when.textContent = m.started
               ? new Date(m.started * 1000).toLocaleString()
               : "";
-            const status = document.createElement("span");
-            status.className = `status${m.status !== "left" ? " live" : ""}`;
-            status.textContent = m.status !== "left" ? "live" : "";
-            a.append(link, who, when, status);
+            a.append(link, who, when);
             return a;
           }));
         })
