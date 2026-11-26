@@ -65,7 +65,7 @@ SCALE = 5
 
 def frame(status: str, tick: int = 0) -> bytes:
     raw = base()
-    glow = 0.7 + 0.3 * abs((tick % (FPS * 2)) / FPS - 1)
+    glow = 0.7 + 0.3 * abs((tick % FPS) / (FPS / 2) - 1)
     lut = bytes(min(255, round(i * glow)) for i in range(256))
     y = bytearray(raw[: W * H].translate(lut))
     uv = raw[W * H :]
@@ -102,7 +102,7 @@ class Feed:
             if status == self.status:
                 return
             self.status = status
-            loop = b"".join(frame(status, tick) for tick in range(FPS * 2))
+            loop = b"".join(frame(status, tick) for tick in range(FPS))
             with open(self.path, "wb") as pipe:
                 pipe.write(
                     f"YUV4MPEG2 W{W} H{H} F{FPS}:1 Ip A0:0 C420jpeg\n".encode()

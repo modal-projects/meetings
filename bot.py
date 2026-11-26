@@ -852,6 +852,21 @@ class Kimi:
                         pass
                 frames = [f for f in frames if f]
                 if frames:
+                    directory = archive_dir(self.state) / "screens"
+                    await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
+                    for f in frames:
+                        png = base64.b64decode(f["image"].split(",", 1)[1])
+                        name = f"{len(self.state['screens'])}.png"
+                        await asyncio.to_thread((directory / name).write_bytes, png)
+                        presenter = f.get("presenter")
+                        self.state["screens"].append(
+                            {
+                                "t": time.time(),
+                                "speaker": presenter,
+                                "desc": presenter or "the shared screen",
+                                "file": f"screens/{name}",
+                            }
+                        )
                     labels = [
                         f.get("presenter") or "the shared screen" for f in frames
                     ]
@@ -981,6 +996,7 @@ class Kimi:
                 asyncio.create_task(asyncio.to_thread(tts.say_fresh, sentence))
                 for sentence in sentences
             ]
+            self.feed.set("ANSWERING")
             for render in renders:
                 pcm = await render
                 total += len(pcm)
@@ -1069,7 +1085,7 @@ class Kimi:
                         "session %s: gate failed", self.state["session"]
                     )
                     continue
-                self.feed.set("ANSWERING")
+                self.feed.set("THINKING")
                 channel_task = asyncio.create_task(
                     self.channel(client, questions, recent)
                 )
