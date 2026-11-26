@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import os
@@ -412,7 +411,6 @@ class Kimi:
         self.synced = page.frame_locator('iframe[src*="chat.google.com"]')
         self.dumped = False
         self.mode = None
-        self.last_screen = None
         self.voice = None
         self.muted = True
 
@@ -491,51 +489,6 @@ class Kimi:
                     frame["presenter"] = name
                     break
         return frame
-
-    async def capture(self):
-        frame = await self.frame(presentation_only=True)
-        if not frame:
-            return
-        image = frame["image"]
-        png = base64.b64decode(image.split(",", 1)[1])
-        if (digest := hashlib.md5(png).hexdigest()) == self.last_screen:
-            return
-        self.last_screen = digest
-        directory = archive_dir(self.state) / "screens"
-        await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
-        name = f"{len(self.state['screens'])}.png"
-        await asyncio.to_thread((directory / name).write_bytes, png)
-        async with self.client() as client:
-            response = await client.post(
-                "chat/completions",
-                json={
-                    "model": await self.model_id(client),
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "Describe this shared screen in one sentence.",
-                                },
-                                {"type": "image_url", "image_url": {"url": image}},
-                            ],
-                        }
-                    ],
-                    "max_tokens": 128,
-                    "chat_template_kwargs": {"thinking": False},
-                },
-            )
-            response.raise_for_status()
-        desc = (response.json()["choices"][0]["message"].get("content") or "").strip()
-        self.state["screens"].append(
-            {
-                "t": time.time(),
-                "speaker": frame.get("presenter"),
-                "desc": desc,
-                "file": f"screens/{name}",
-            }
-        )
 
     async def chat(self):
         legacy = self.page.get_by_role("textbox", name="Send a message", exact=True)
@@ -1482,7 +1435,7 @@ class Meetings:
             blocks = {}
             seen_others = False
             alone_since = None
-            flushed = screened = time.monotonic()
+            flushed = time.monotonic()
             while True:
                 try:
                     await read_captions(captions, state["transcript"], blocks)
@@ -1528,14 +1481,6 @@ class Meetings:
                         logger.exception("session %s: recap failed", state["session"])
                     break
                 now = time.monotonic()
-                if now - screened >= 30:
-                    screened = now
-                    try:
-                        await kimi.capture()
-                    except Exception:
-                        logger.exception(
-                            "session %s: screen capture failed", state["session"]
-                        )
                 if now - flushed >= 60:
                     flushed = now
                     try:
