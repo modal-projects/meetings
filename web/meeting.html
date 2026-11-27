@@ -221,6 +221,20 @@
           pane.replaceChildren(...entries.map(entry => {
             const line = document.createElement("p");
             line.className = `entry${entry.speaker === "Hal" ? " hal" : ""}`;
+            if (id === "screens") {
+              if (entry.file) {
+                const a = document.createElement("a");
+                a.href = `/m/${window.location.pathname.split("/")[2]}/${entry.file}`;
+                a.className = "shot loading";
+                const img = document.createElement("img");
+                img.src = a.href;
+                img.onload = () => a.classList.remove("loading");
+                img.onerror = () => a.remove();
+                a.append(img);
+                line.append(a);
+              }
+              return line;
+            }
             const text = document.createElement("span");
             text.innerHTML = md(entry.text ?? entry.desc);
             const t = document.createElement("span");
@@ -230,17 +244,6 @@
             speaker.className = "speaker";
             speaker.textContent = entry.speaker ?? "";
             line.append(t, " ", speaker, entry.speaker ? ": " : " ", text);
-            if (id === "screens" && entry.file) {
-              const a = document.createElement("a");
-              a.href = `/m/${window.location.pathname.split("/")[2]}/${entry.file}`;
-              a.className = "shot loading";
-              const img = document.createElement("img");
-              img.src = a.href;
-              img.onload = () => a.classList.remove("loading");
-              img.onerror = () => a.remove();
-              a.append(img);
-              line.append(document.createElement("br"), a);
-            }
             return line;
           }));
           pane.scrollTop = pane.scrollHeight;
